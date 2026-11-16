@@ -1,0 +1,180 @@
+name: Build & Rilis
+
+# Build Stock Uploader di repo PUBLIK ini, supaya menit GitHub Actions gratis (repo publik tidak
+# memakai kuota, termasuk runner Mac). Kode tetap di repo private hadyanbaqi/stock-uploader;
+# workflow ini hanya mengambilnya saat build memakai secret SOURCE_TOKEN.
+#
+# Cara pakai: Actions > Build & Rilis > Run workflow
+#   - branch kode : main (atau branch fitur yang mau dites)
+#   - terbitkan   : centang untuk menerbitkan rilis (versi dari package.json, harus belum pernah terbit)
+#   - catatan     : isi "Apa yang baru" yang tampil di aplikasi
+#
+# Secret yang dibutuhkan (Settings > Secrets and variables > Actions):
+#   SOURCE_TOKEN = token GitHub fine-grained, akses hanya ke hadyanbaqi/stock-uploader, izin "Contents: Read-only".
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch kode di repo stock-uploader'
+        required: true
+        default: main
+      terbitkan:
+        description: 'Terbitkan sebagai rilis baru (update otomatis ke aplikasi)'
+        type: boolean
+        default: false
+      notes:
+        description: 'Catatan "Apa yang baru" (kosong = pesan commit terakhir)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.event.inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            dist: dist:win
+            files: dist/*.exe
+            app: dist/win-unpacked/Stock Uploader.exe
+          - os: macos-latest
+            dist: dist:mac
+            files: dist/*.dmg
+            app: dist/mac-arm64/Stock Uploader.app/Contents/MacOS/Stock Uploader
+    runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Token kode harus ada
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.SOURCE_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Secret SOURCE_TOKEN belum diisi di repo ini (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Ambil kode dari repo private
+        uses: actions/checkout@v4
+        with:
+          repository: hadyanbaqi/stock-uploader
+          ref: ${{ github.event.inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Simpan cache upscaler
+        uses: actions/cache@v4
+        with:
+          path: resources/upscaler
+          key: upscaler-${{ runner.os }}-${{ hashFiles('scripts/fetch-upscaler.mts') }}
+
+      - name: Unduh upscaler Real-ESRGAN (SHA-256 dikunci)
+        run: node scripts/fetch-upscaler.mts
+
+      - name: Cek tipe + semua tes
+        run: npm run ci:test
+
+      - name: Tes aplikasi asli (upload, riwayat, metadata)
+        timeout-minutes: 10
+        run: npm run test:app
+        continue-on-error: true
+
+      - name: Buat installer
+        run: npm run ${{ matrix.dist }}
+
+      - name: Cek upscaler di dalam installer (file, tanda tangan, bisa dijalankan)
+        run: node scripts/check-upscaler.mts
+        env:
+          APP: ${{ github.workspace }}/${{ matrix.app }}
+
+      - name: Tes aplikasi hasil installer
+        timeout-minutes: 5
+        run: node scripts/test-app.mts
+        env:
+          APP: ${{ github.workspace }}/${{ matrix.app }}
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stock-Uploader-${{ runner.os }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
+          retention-days: 7
+
+  terbitkan:
+    if: ${{ github.event.inputs.terbitkan == 'true' }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ambil kode dari repo private
+        uses: actions/checkout@v4
+        with:
+          repository: hadyanbaqi/stock-uploader
+          ref: ${{ github.event.inputs.ref }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Versi dari package.json, belum pernah terbit
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if gh release view "v$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Rilis v$V sudah ada. Naikkan \"version\" di package.json dulu."
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: installer
+
+      - name: Catatan rilis
+        env:
+          INPUT_NOTES: ${{ github.event.inputs.notes }}
+        run: |
+          if [ -n "$(echo "$INPUT_NOTES" | tr -d '[:space:]')" ]; then printf '%s\n' "$INPUT_NOTES" > catatan.md
+          else git log -1 --format=%B > catatan.md; fi
+
+      - name: Susun latest.json (versi, sidik SHA-256, ukuran)
+        id: m
+        run: |
+          node scripts/release-manifest.mts "${{ steps.v.outputs.version }}" installer catatan.md latest.json | tee manifest.log
+          echo "assets=$(grep '^ASSETS=' manifest.log | cut -d= -f2-)" >> "$GITHUB_OUTPUT"
+
+      - name: Terbitkan rilis di repo ini
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+          ASSETS: ${{ steps.m.outputs.assets }}
+        run: |
+          mapfile -t FILES < <(node -e "for (const f of JSON.parse(process.env.ASSETS)) console.log(f)")
+          PRE=""
+          case "$VERSION" in *-*) PRE="--prerelease";; esac
+          gh release create "v$VERSION" "${FILES[@]}" latest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target main \
+            --title "Stock Uploader $VERSION" \
+            --notes "$(node -e "console.log(JSON.parse(require('fs').readFileSync('latest.json','utf8')).notes || 'Pembaruan Stock Uploader.')")" \
+            $PRE
