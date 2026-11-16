@@ -1,16 +1,16 @@
 name: Build & Rilis
 
 # Build Stock Uploader di repo PUBLIK ini, supaya menit GitHub Actions gratis (repo publik tidak
-# memakai kuota, termasuk runner Mac). Kode tetap di repo private hadyanbaqi/stock-uploader;
-# workflow ini hanya mengambilnya saat build memakai secret SOURCE_TOKEN.
+# memakai kuota, termasuk runner Mac). Kode diambil dari hadyanbaqi/stock-uploader (publik).
+# Kalau repo kode dijadikan private lagi, isi secret SOURCE_TOKEN (token baca) supaya tetap bisa diambil.
 #
 # Cara pakai: Actions > Build & Rilis > Run workflow
 #   - branch kode : main (atau branch fitur yang mau dites)
 #   - terbitkan   : centang untuk menerbitkan rilis (versi dari package.json, harus belum pernah terbit)
 #   - catatan     : isi "Apa yang baru" yang tampil di aplikasi
 #
-# Secret yang dibutuhkan (Settings > Secrets and variables > Actions):
-#   SOURCE_TOKEN = token GitHub fine-grained, akses hanya ke hadyanbaqi/stock-uploader, izin "Contents: Read-only".
+# Secret opsional (hanya kalau repo kode private): SOURCE_TOKEN = token fine-grained, "Contents: Read-only"
+# untuk hadyanbaqi/stock-uploader.
 
 on:
   workflow_dispatch:
@@ -53,22 +53,12 @@ jobs:
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
-      - name: Token kode harus ada
-        shell: bash
-        env:
-          TOKEN: ${{ secrets.SOURCE_TOKEN }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::Secret SOURCE_TOKEN belum diisi di repo ini (Settings > Secrets and variables > Actions)."
-            exit 1
-          fi
-
-      - name: Ambil kode dari repo private
+      - name: Ambil kode dari hadyanbaqi/stock-uploader
         uses: actions/checkout@v4
         with:
           repository: hadyanbaqi/stock-uploader
           ref: ${{ github.event.inputs.ref }}
-          token: ${{ secrets.SOURCE_TOKEN }}
+          token: ${{ secrets.SOURCE_TOKEN || github.token }}
           persist-credentials: false
 
       - uses: actions/setup-node@v4
@@ -122,12 +112,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Ambil kode dari repo private
+      - name: Ambil kode dari hadyanbaqi/stock-uploader
         uses: actions/checkout@v4
         with:
           repository: hadyanbaqi/stock-uploader
           ref: ${{ github.event.inputs.ref }}
-          token: ${{ secrets.SOURCE_TOKEN }}
+          token: ${{ secrets.SOURCE_TOKEN || github.token }}
           persist-credentials: false
 
       - uses: actions/setup-node@v4
